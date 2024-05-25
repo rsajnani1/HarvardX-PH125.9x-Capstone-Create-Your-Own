@@ -1,0 +1,536 @@
+---
+title: HarvardX | PH125.9x | CASDatasets Project - Claims Frequency
+author: "Reema Sajnani"
+date: "2024-05-22"
+output:
+   bookdown::pdf_document2:
+    latex_engine: lualatex
+    toc: true
+    number_sections: true
+---
+\newpage
+
+# EXECUTIVE SUMMARY
+It is important for insurers to understand what portion of their policy holders will file claims and, how often. This project puts us in the shoes of insurers and analyzes third party motor insurance claims made in France. The goal is to predict how frequently insurance claims are made on policies, with as much accuracy as possible. In order to test accuracy we will aim to have a Mean Absolute Error closer to 0. 
+
+The particular data sets selected from CASdatasets (hosted by Christophe Dutang) and are referred to as FreMTPL2freq (frequency data set) and FreMTPL2sev (severity data set). The former comprises data on insurance policy and claim frequency, while the latter includes information on the associated claim severity amounts.
+
+This project uses Generalized Linear Model and a Decision Tree model. These models obtain Mean Absolute Errors of 7.29% and 11.09% respectively. The GLM is our model of choice due to it's low error value, making it a good fit.
+
+\newpage
+
+# PACKAGE INSTALLATION AND DATA SETUP
+
+```{r}
+if(!require(knitr)) install.packages("knitr", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(dplyr)) install.packages("dplyr", repos = "http://cran.us.r-project.org")
+if(!require(lattice)) install.packages("lattice", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(rpart)) install.packages("rpart", repos = "https://cran.r-project.org/package=rpart")
+if(!require(rpart.plot)) install.packages("rpart.plot", repos = "https://CRAN.R-project.org")
+if(!require(repr)) install.packages("repr", repos = "http://cran.us.r-project.org")
+if(!require(xts)) install.packages("xts", repos = "http://cran.us.r-project.org")
+if(!require(sp)) install.packages("sp", repos = "http://cran.us.r-project.org")
+if(!require(zoo)) install.packages("zoo", repos = "http://cran.us.r-project.org")
+if(!require(modelr)) install.packages("modelr", repos = "http://cran.us.r-project.org")
+install.packages("CASdatasets", repos = "http://cas.uqam.ca/pub/", type="source")
+if(!require(AER)) install.packages("AER", repos = "http://cran.us.r-project.org")
+library("knitr")
+library("tidyverse")
+library("dplyr")
+library("lattice")
+library("caret")
+library("rpart")
+library("rpart.plot")
+library("repr")
+library("modelr")
+library("CASdatasets")
+library("AER")
+```
+  
+# LOAD DATA SETS
+```{r}
+
+#load the two data sets and convert into tibbles
+data(freMTPL2freq)
+data <- as_tibble(freMTPL2freq)
+data(freMTPL2sev)
+sev<- as_tibble(freMTPL2sev)
+
+```
+
+\newpage
+
+# DATA EXPLORATION
+
+## Data Class and Details
+
+We first explore the data sets. 
+
+freMTPL2freq (frequency data set) - this has 12 vectors and 678,013 rows of observations. Below we explore their class and description.
+
+```{r,echo=FALSE}
+#inspecting dimensions of first data set
+cat("Dimensions", dim(data))
+
+
+```
+  
+CLASS:
+
++ **IDpol** ```<numeric>``` unique Policy ID
++ **ClaimNb** ```<table>``` Number of claims during the exposed time period
++ **Exposure** ```<numeric>``` time period (years)
++ **VehPower** ```<integer>``` Power of the insured car
++ **VehAge** ```<integer>``` Vehicle age (in years)
++ **DrivAge** ```<integer>``` Driver age (in years)
++ **BonusMalus** ```<integer>``` Bonus/malus, between 50 and 230
++ **VehBrand** ```<factor>``` Car Brand
++ **VehGas** ```<character>``` Car Fuel Type
++ **Area** ```<factor>``` “A” for rural to “F” for urban centre
++ **Density** ```<integer>``` Population density in the area where driver resides
++ **Region** ```<factor>``` Policy region in France
+
+
+freMTPL2sev (severity data set) - this has 2 vectors and 26,639 rows of observations. Below we explore their class and description.
+
+```{r,echo=FALSE}
+
+#inspecting dimensions of second data set
+cat("Dimensions", dim(sev))
+```
+
+CLASS:
+  
+
++ **IDpol** ```<numeric>``` unique Policy ID
++ **ClaimAmount** ```<table>``` Amount per claim made
+
+
+## Data Clean-up and Modifications
+
+We start by making sure all columns are in a format that can be filtered and used ahead for visualization and model calculation.
+
+```{r, echo=FALSE}
+#change class of VehGas vector and double precision ClaimNb vector
+
+data <- data %>% mutate(VehGas = factor(VehGas, levels = c("Diesel","Regular")), ClaimNb = as.double(ClaimNb))
+
+#inspecting frequency data set after modification
+cat("This is what the frequency data set looks like after changing the class of VehGas vector  and double precision ClaimNb vector")
+
+head(data)
+```
+
+We will add claim numbers to severity data set and join these into the frequency data set. This is because there are many rows in the frequency dataset which show a claim was made, however, their corresponding claim amounts are not mentioned in the severity data set. Vice-Versa also applies.
+
+
+
+```{r, echo=FALSE}
+
+#Showcase claim numbers in Severity data set instead of claim amounts
+sev$ClaimNb <- 1
+sev_agg <- aggregate(sev,by=list(IDpol=sev$IDpol),FUN = sum)[c("IDpol","ClaimNb")]
+cat("Updated severity data set with claim frequencies:")
+head(sev_agg)
+```
+
+Joining the frequency and severity data sets ensures we work only with those policy IDs that have valid corresponding claim entries in both sets.
+  
+  
+```{r, echo=FALSE}
+#join the two data sets
+joint <- left_join(data[,-2],sev_agg,by="IDpol")
+
+#replace all NA with a 0
+joint[is.na(joint)] <- 0
+
+cat("Sample View of the Joint data set after taking claim frequencies from the severity data set:")
+head(joint)
+
+```
+
+## Data Insights
+
+### Number of Claims
+
+Only about 3.67% of policies seem to have made claims, with one claim being the most commonly occurring (3.48% policies).
+  
+  
+```{r, echo=FALSE}
+#see what percentage of policies have had claims filed by number of claims
+
+claimpercent <- joint %>% group_by(ClaimNb) %>% summarize(count = n()) %>% mutate(percent = count / sum(count) * 100)
+claimpercent
+
+```
+
+
+### Policy Exposures
+
+In this histogram, we notice that very few cases have exposures durrations greater than one year.
+
+```{r,echo=FALSE}
+
+#inspecting the Exposures column
+hist(joint$Exposure,main = "Number of Claims by Exposure Duration", xlab = "Exposure Duration (years)",ylab = "Number of Claims", breaks=40, col="black", xlim=c(0,2.05), ylim=c(0,170000))
+
+```
+
+### Drivers' Age
+
+We notice that there are very few instances of drivers above the age of 90, making claims.
+
+
+```{r,echo=FALSE}
+#inspecting the Driver Age column
+hist(joint$DrivAge, main = "Number of Claims by Driver Age", xlab = "Driver Age (years)",ylab = "Number of Claims",breaks=15, col="black", xlim=c(0,90), ylim=c(0,120000))
+
+```
+
+
+
+### Vehicle Age
+
+In this case it is visible that very few claims are made on cars that are more than 20 years old.
+
+```{r, echo=FALSE}
+#inspecting the Vehicle Age column
+hist(joint$VehAge,main = "Number of Claims by Vehicle Age", xlab = "Vehicle Age (years)",ylab = "Number of Claims", breaks=40, col="black", xlim=c(0,100), ylim=c(0,200000))
+```
+
+
+## Data Pre-Processing
+
+Based on our visualization above, we make some corrections to the data in order to make our analysis more effective. Next steps will include:
+  
+a. Correcting number of claims above 4 to equal to 4. We believe greater than 4 claims are highly unlikely and are caused from data entry errors
+  
+b. Correcting exposures over 1 year, to 1 year. Since this is yearly claim data set, exposure greater than 1 year could be from data entry errors
+  
+c. Correcting all Driver Ages above 90 years, to 90. It is unlikely for someone at that age to be driving
+  
+d. Correcting Vehicle Ages over 40 years, to 40 year. It is unlikely cars last that long and we assume these entries are from data entry errors
+
+
+```{r,echo=FALSE}
+
+#removing outliers
+
+joint$ClaimNb  <- pmin(joint$ClaimNb,4)  
+joint$Exposure <- pmin(joint$Exposure,1) 
+joint$DrivAge  <- pmin(joint$DrivAge,90)   
+joint$VehAge  <- pmin(joint$VehAge,40)
+
+cat("After making the above changes, the data set looks something like this:")
+sample(joint)
+
+```
+
+## Impact on Claim Rate
+  
+
+So far we saw the number of claims made by sub groups in each vector. 
+Now we will analyze how frequently these groups make claims.
+
+We start by adding a column for the claim frequency of every entry.
+
+```{r, echo=FALSE}
+#let's see the relationship between some vectors and claims frequency
+
+#create a new version of the data set with Frequency column
+new_joint <- joint %>% mutate(Freq=ClaimNb/Exposure)
+
+cat("the New Joint data set looks something like this:")
+sample(new_joint)
+
+```
+
+
+### Driver Age
+
+First we analyze driver age impact on claim frequency.
+  
+From the below plot, it is clear that the highest claim frequency is coming from the age group under 25, with 18 year-olds being the most frequent claimants.
+
+```{r,echo=FALSE}
+
+
+DAge_corr <- new_joint %>% group_by(DrivAge) %>% summarize(claim_frequency=mean(ClaimNb)/mean(Exposure))
+
+cat("These are the top 5 age groups with highest average claim rates:")
+head(DAge_corr,5)
+
+
+DAge_corr %>% ggplot(aes(DrivAge, claim_frequency))+ geom_area(fill="grey")+ labs(title = "Average Frequency by Age Level", x = "Driver Age",y = "Average Claim Frequency")
+
+```
+  
+### Fuel Type, Vehicle Brand and Vehicle Age
+
+When assessing Fuel Type and Car Brand groups, we notice overall lower frequencies for regular fuel cars compared to diesel powered ones. We also see that vehicles that are newer (orange plot dot in the graph), seem to be the ones claiming more often.
+```{r,echo=FALSE}
+
+#Checking dependency on Fuel Type and Vehicle Brand
+
+fuelagebrand <- new_joint %>% mutate(VehAgeS=as.factor(pmin(VehAge, 4))) %>% group_by(VehBrand,VehAgeS,VehGas) %>% summarize(claim_frequency=mean(ClaimNb)/mean(Exposure), expo=sum(Exposure)) %>%  ggplot(aes(x=VehBrand, y=claim_frequency, color=VehAgeS)) + facet_grid(. ~ VehGas) + geom_point(size=2) + labs(title = "Average Frequency by Vehicle Brand, Age and Fuel Type", x = "Vehicle Brand",y = "Average Claim Frequency")
+
+
+fuelagebrand 
+
+
+```
+
+### Area
+
+Looking at the below chart, it is clear that claims flow in more often from urban areas (Area F). This Area also has an overall higher median claim frequency.
+
+```{r,echo=FALSE}
+#checking impact of Area
+
+new_joint %>% ggplot(aes(Area, Freq))+  geom_boxplot() + scale_y_log10() +labs(title = "Average Frequency by Area", x = "Area",y = "Average Claim Frequency")
+
+
+```
+
+
+
+### Region
+  
+Rhone-Alps, Ile-de-France and Picardie regions have the highest claims frequency. One of these is a major city, which could be a reason for the higher claim rate.
+
+
+```{r,echo=FALSE}
+#checking impact of Region
+
+regionimp <- new_joint %>% group_by(Region) %>% summarize(claim_frequency=mean(ClaimNb)/mean(Exposure)) %>%  arrange(desc(claim_frequency))
+
+regionimp %>% ggplot(aes(Region, claim_frequency))+geom_point() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+ labs(title = "Average Frequency by Region", x = "Area",y = "Average Claim Frequency")
+
+
+```
+
+
+
+\newpage
+
+# DATA MODELLING
+
+## Distribution Type
+
+From the below histogram we conclude that our data is based on a Poisson Distribution (rate related data). This will play an important role in the model we choose later in this project and the arguments to be included in the code.
+This also means that Poisson GLM will be a natural first modelling approach.
+
+```{r,echo=FALSE}
+
+#Check Distribution type before going into Regression Analysis
+
+hist(log10(new_joint$Freq),main = "Frequency Distribution", xlab = "Frequency of Claim",ylab = "Number of Claims",)
+
+
+```
+
+## Train and Test Sets
+
+We split our data into a 70:30 split to ensure there is enough representation of variability in the test set.
+  
+NOTE: We also tried 80:20 and 90:10 splits but got very poor results. Hence we conclude that 70:30 is a good representation.
+  
+```{r,echo=FALSE}
+
+#we start by creating test and training data sets
+set.seed(0)
+test_index <- createDataPartition(y = new_joint$ClaimNb, times = 1, p = 0.3, list = FALSE)
+train_set <- new_joint[-test_index,]
+test_set <- new_joint[test_index,]
+
+```
+
+The train set has 203404 observations.
+  
+  
+
+## Generalized Linear Model
+  
+  
+They key assumptions for this model are:
+  
+  a. the relationship between number of claims and log(claim frequency) is linear
+    
+  b. each claim outcome are independent of one another
+    
+  c. mean is equal to the variance
+  
+Formula applicable to Poisson Distribution
+$$log(y) = \beta_0 + \beta_1x_1 + \beta_2x_2 +....+\beta_px_p$$
+Where:
+  
+  y: Is the rate variable or 'Lambda'. In our case this is the claim frequency rate
+    
+  Beta: numeric coefficients, Beta0 being the intercept
+    
+  x: predictor variables
+  
+Since this is rate based data, we need an offset of the logarithmic denominator. So, customizing the above equation for our model, we use this formula, where log(Exposure) is the offset.
+
+$$log(ClaimNb) = \beta_0 + \beta_1x_1 + \beta_2x_2 +....+\beta_px_p + log(Exposure)$$
+
+
+After fitting the Generalized Linear Model (GLM), we are able to see the most significant objects.
+ 
+```{r,echo=FALSE}
+#Fitting the GLM  model
+
+train_glm_offset <- glm(ClaimNb ~ VehPower+VehAge+DrivAge+BonusMalus+VehBrand+VehGas+Area+Density+Region + offset(log(Exposure)), family="poisson", data = train_set)
+
+#Checking which predictors are significant
+summary(train_glm_offset)
+
+
+
+```
+  
+
+From the table above we can infer that the most significant predictors are Vehicle Power, Vehicle Age, Driver Age, Bonus Malus, a couple of Car Brands and all areas (except A).
+We also noticed the difference between the residual deviance and degrees of freedom, leading us to a dispersion test.
+  
+
+```{r,echo=FALSE}
+dispersiontest(train_glm_offset,trafo=1)
+
+```
+  
+Since alpha is quite close to 0 we don't have to worry about dispersion here and it is already a good sign of model fitting our data well.
+
+As a next step, we must take exponential of the GLM fit summary table to ensure the formula mentioned at the start of the model is adhered.
+  
+  
+```{r,echo=FALSE}
+
+round(exp(coef(train_glm_offset)),3)
+```
+We provide couple of examples below of interpreting the coefficients:
+  
+  - If Vehicle Age increases by 1, the claim frequency goes up by a factor of 0.983
+  
+  - If Vehicle Power goes up by 1, the claim frequency goes up by a factor of 1.038
+  
+  - If a driver resides in Rhone-Alpes, the claim frequency goes up by a factor of 1.289
+  
+  
+  
+The next step was to calculate predictions and analyze the model's capability to predict on the test set using the below code.
+
+A sample of predictions generated are seen here:
+
+
+```{r, echo=FALSE}
+pred_glm_offset <- predict(train_glm_offset, test_set, type = "response", newoffset=log(Exposure))
+
+round(sample(pred_glm_offset,6),3)
+
+```
+
+
+
+We will use Mean Absolute Error to evaluate accuracy of the model.
+
+$$MAE = (Σ|yi – xi|)/n$$
+
+
+  
+```{r,echo=FALSE}
+mae_glm <- sum( abs(pred_glm_offset - test_set$ClaimNb) ) / nrow(test_set)
+mae_glm
+```
+
+Our model achieves an MAE of 7.29% which is not too far from 0, meaning the model is quite good at predicting the rate of claims.
+
+
+
+## Decision Tree Model
+  
+Our second model in this project is a decision tree model. The first node of the the below decision tree shows that overall claim frequency is about 7.4%. The highest claim frequency is of the group that has a Bonus Malus above 96 and car brand is not B12 (31%).
+  
+
+```{r,echo=FALSE}
+tree_train <- rpart(cbind(Exposure,ClaimNb) ~ Area + VehPower + VehAge + DrivAge + BonusMalus + VehBrand + VehGas + Density + Region, train_set,  method="poisson", control=rpart.control(maxdepth=3,cp=0.001))   
+
+rpart.plot(tree_train)
+
+```
+
+  
+The next step was to calculate predictions and analyze the model's capability to predict on the test set using the below code.
+
+A sample of predictions generated are seen here:
+
+
+```{r, echo=FALSE}
+pred_tree <- predict(tree_train, test_set, type = "vector", newoffset=log(Exposure))
+
+round(sample(pred_tree,6),3)
+
+```
+
+  
+We will use Mean Absolute Error to evaluate accuracy of the model.
+
+$$MAE = (Σ|yi – xi|)/n$$
+```{r,echo=FALSE}
+mae_tree <- sum( abs(pred_tree - test_set$ClaimNb) ) / nrow(test_set)
+mae_tree
+```
+
+Our model achieves an MAE of 11.09% which is a bit high, meaning the model is not too great at predicting the rate of claims
+
+
+\newpage
+
+# RESULTS
+The objective was to forecast the frequency of insurance claims on policies with utmost precision. 
+To assess accuracy, we used Mean Absolute Error on the predictions from GLM and Decision Tree models.
+The models resulted in an error of 7.29% and 11.09% respectively. 
+The GLM is our model of choice as the error is not too far from 0, indicating a strong fit. 
+
+
+
+  
+\newpage
+# Limitations
+  
+Due to limited computing power, and this data set being quite large, we couldn't try other models such as KNN. 
+
+
+# References
+
+Dutang, Christophe, and Arthur Charpentier. “CASdatasets: Insurance Datasets.” Cas.uqam.ca, Christophe Dutang, 12 Nov. 2020, cas.uqam.ca/. Accessed 10 May 2024.
+  
+
+Floser. “Comparing-Claims-FreMTPL2freq-Sev.” Kaggle, www.kaggle.com/code/floser/comparing-claims-fremtpl2freq-sev. Accessed 10 May 2024.
+  
+
+Floser, and Daniel_K. “GLM, Neural Nets and XGBoost for Insurance Pricing.” Kaggle, www.kaggle.com/code/floser/glm-neural-nets-and-xgboost-for-insurance-pricing. Accessed 10 May 2024.
+  
+
+Schelldorfer, Jürg and Wuthrich, Mario V., Nesting Classical Actuarial Models into Neural Networks (January 22, 2019). Available at SSRN: https://ssrn.com/abstract=3320525 or http://dx.doi.org/10.2139/ssrn.3320525
+
+Noll, Alexander and Salzmann, Robert and Wuthrich, Mario V., Case Study: French Motor Third-Party Liability Claims (March 4, 2020). Available at SSRN: https://ssrn.com/abstract=3164764 or http://dx.doi.org/10.2139/ssrn.3164764
+  
+
+“57 Poisson Regression | R for Epidemiology.” Www.r4epi.com, www.r4epi.com/poisson-regression. Accessed 15 May 2024.
+  
+
+Chapter 4 | the Poisson Distribution. University of Wisconsin, Department of Statistics.
+  
+
+MarinStatsLectures-R Programming & Statistics. “9.10 Poisson Regression in R: Fitting a Model to Rate Data (with Offset) in R.” YouTube, 24 Feb. 2021, www.youtube.com/watch?v=QP4F98ysrEA. Accessed 14 May 2024.
+  
+
+Phil Chan. “GLM in R: Poisson Regression Example (Basic Version).” YouTube, 21 Dec. 2012, www.youtube.com/watch?v=VzYSrCLugtY. Accessed 15 May 2024.
+  
+
+Proteus. “Interpreting Effect Sizes in Poisson Regression (or When Using a Log-Link Function).” YouTube, 4 Oct. 2022, www.youtube.com/watch?v=TCVinvY6nRQ. Accessed 17 May 2024.
+
+
